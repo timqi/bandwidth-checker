@@ -2,6 +2,9 @@
 import csv
 import os
 import re
+import subprocess
+import threading
+import time
 from typing import Any, Dict, List, Optional
 
 _REPLY_RE = re.compile(
@@ -55,3 +58,53 @@ def write_ping_csv(rows: List[Dict[str, Any]], filepath: str) -> None:
         if not file_exists:
             writer.writeheader()
         writer.writerows(rows)
+
+
+class LatencyCollector:
+    """Run ping in background and collect RTT data to CSV."""
+
+    def __init__(self, remote_host: str, csv_path: str, interval: float = 1.0):
+        self.remote_host = remote_host
+        self.csv_path = csv_path
+        self.interval = interval
+        self._process: subprocess.Popen = None
+        self._thread: threading.Thread = None
+        self._stop = threading.Event()
+        self.samples: list = []
+
+    def start(self) -> None:
+        """Start ping process and reader thread."""
+        self._stop.clear()
+        self._process = subprocess.Popen(
+            ["ping", "-i", str(self.interval), self.remote_host],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        self._thread = threading.Thread(target=self._reader, daemon=True)
+        self._thread.start()
+
+    def _reader(self) -> None:
+        """Read ping output line by line."""
+        for line in self._process.stdout:
+            if self._stop.is_set():
+                break
+            parsed = parse_ping_line(line.strip())
+            if parsed:
+                parsed["timestamp"] = time.time()
+                self.samples.append(parsed)
+                write_ping_csv([parsed], self.csv_path)
+
+    def stop(self) -> None:
+        """Stop ping process and reader thread."""
+        self._stop.set()
+        if self._process and self._process.poll() is None:
+            self._process.kill()
+            self._process.wait(timeout=5)
+        if self._thread:
+            self._thread.join(timeout=5)
+
+    def get_recent_avg_rtt(self, last_n: int = 5) -> float:
+        """Return average RTT of last N samples."""
+        recent = self.samples[-last_n:]
+        if not recent:
+            return 0.0
+        return sum(s["time_ms"] for s in recent) / len(recent)
