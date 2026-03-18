@@ -2,7 +2,11 @@
 import csv
 import json
 import os
+import subprocess
+import time
 from typing import Any, Dict, List
+
+from config import TestConfig
 
 
 def parse_iperf_tcp_json(data: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -87,3 +91,86 @@ def write_iperf_csv(rows: List[Dict[str, Any]], filepath: str) -> None:
         if not file_exists:
             writer.writeheader()
         writer.writerows(rows)
+
+
+class IperfRunner:
+    """Manage an iperf3 client process and collect results."""
+
+    def __init__(self, cfg: TestConfig, protocol: str, direction: str,
+                 bandwidth_mbps: int, port: int, duration: int = 60,
+                 small_packet: bool = False):
+        self.cfg = cfg
+        self.protocol = protocol
+        self.direction = direction
+        self.bandwidth_mbps = bandwidth_mbps
+        self.port = port
+        self.duration = duration
+        self.small_packet = small_packet
+        self._process: subprocess.Popen = None
+
+    def build_command(self) -> list:
+        """Build iperf3 command line."""
+        cmd = [
+            "iperf3", "-c", self.cfg.remote_host,
+            "-p", str(self.port),
+            "-t", str(self.duration),
+            "-J",
+        ]
+        if self.protocol == "udp":
+            cmd.extend(["-u", "-b", f"{self.bandwidth_mbps}M"])
+            if self.small_packet:
+                cmd.extend(["-l", "512"])
+        else:
+            if self.bandwidth_mbps >= 1000:
+                cmd.extend(["-P", str(self.cfg.tcp_parallel_streams)])
+
+        if self.direction == "ingress":
+            cmd.append("-R")
+        elif self.direction == "bidir":
+            cmd.append("--bidir")
+
+        return cmd
+
+    def run(self) -> dict:
+        """Run iperf3 and return parsed JSON. Blocking."""
+        cmd = self.build_command()
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True,
+                timeout=self.duration + 30,
+            )
+            if result.returncode != 0:
+                return {"error": result.stderr, "intervals": []}
+            return json.loads(result.stdout)
+        except subprocess.TimeoutExpired:
+            return {"error": "timeout", "intervals": []}
+        except json.JSONDecodeError:
+            return {"error": "invalid json", "intervals": []}
+
+    def run_background(self) -> None:
+        """Start iperf3 in background (non-blocking). Use wait() to get result."""
+        cmd = self.build_command()
+        self._process = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+
+    def wait(self, timeout: int = None) -> dict:
+        """Wait for background process and return parsed JSON."""
+        if not self._process:
+            return {"error": "no process", "intervals": []}
+        try:
+            stdout, stderr = self._process.communicate(timeout=timeout)
+            if self._process.returncode != 0:
+                return {"error": stderr, "intervals": []}
+            return json.loads(stdout)
+        except subprocess.TimeoutExpired:
+            self._process.kill()
+            return {"error": "timeout", "intervals": []}
+        except json.JSONDecodeError:
+            return {"error": "invalid json", "intervals": []}
+
+    def kill(self) -> None:
+        """Kill the background process if running."""
+        if self._process and self._process.poll() is None:
+            self._process.kill()
+            self._process.wait(timeout=5)
