@@ -95,25 +95,3 @@ def setup_remote_servers(cfg: TestConfig, ports: Optional[list] = None) -> bool:
 
     print("Pre-flight: all checks passed.", flush=True)
     return True
-
-
-def burst_credit_probe(cfg: TestConfig) -> Optional[float]:
-    """Run a 30-second TCP test to check current burst credit state.
-
-    Returns average throughput in Mbps, or None on failure.
-    """
-    import json
-    cmd = [
-        "iperf3", "-c", cfg.remote_host,
-        "-p", str(cfg.iperf_base_port),
-        "-t", "30", "-J",
-    ]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=45)
-        if result.returncode != 0:
-            return None
-        data = json.loads(result.stdout)
-        bps = data["end"]["sum_received"]["bits_per_second"]
-        return bps / 1_000_000
-    except (subprocess.TimeoutExpired, json.JSONDecodeError, KeyError):
-        return None

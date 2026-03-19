@@ -18,6 +18,7 @@ def generate_step_up_charts(
     udp_data: List[Dict],
     ping_data: List[Dict],
     output_dir: str,
+    ceiling_mbps: int = 0,
 ) -> List[str]:
     """Generate Phase 1 step-up charts. Returns list of PNG paths."""
     os.makedirs(output_dir, exist_ok=True)
@@ -31,7 +32,8 @@ def generate_step_up_charts(
     ax.set_xlabel("Target Bandwidth (Mbps)")
     ax.set_ylabel("Actual Throughput (Mbps)")
     ax.set_title("TCP Throughput vs Target Bandwidth")
-    ax.axhline(y=256, color="red", linestyle="--", label="Baseline (256 Mbps)")
+    if ceiling_mbps > 0:
+        ax.axhline(y=ceiling_mbps, color="red", linestyle="--", label=f"Burst ceiling ({ceiling_mbps} Mbps)")
     ax.legend()
     ax.grid(True, alpha=0.3)
     paths.append(_save(fig, os.path.join(output_dir, "step_up_tcp_throughput.png")))
@@ -89,6 +91,7 @@ def generate_timeline_charts(
     ping_csv: str,
     output_dir: str,
     phase_boundaries: List[Dict] = None,
+    ceiling_mbps: int = 0,
 ) -> List[str]:
     """Generate full-test timeline charts from CSV data."""
     import csv
@@ -114,7 +117,8 @@ def generate_timeline_charts(
         ax.set_xlabel("Time (seconds)")
         ax.set_ylabel("Throughput (Mbps)")
         ax.set_title("TCP Throughput Timeline")
-        ax.axhline(y=256, color="red", linestyle="--", alpha=0.5, label="Baseline")
+        if ceiling_mbps > 0:
+            ax.axhline(y=ceiling_mbps, color="red", linestyle="--", alpha=0.5, label=f"Ceiling ({ceiling_mbps} Mbps)")
         if phase_boundaries:
             for pb in phase_boundaries:
                 ax.axvline(x=pb["time"], color="gray", linestyle=":", alpha=0.5)
