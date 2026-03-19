@@ -47,6 +47,7 @@ def run_sustained(cfg: TestConfig, ceiling_mbps: int = 5000) -> dict:
     elapsed = 0
     target_mbps = int(ceiling_mbps * 1.5)  # push 50% above ceiling to ensure saturation
 
+    # --- TCP-only sustained load (no UDP to avoid TCP starvation) ---
     while elapsed < cfg.phase2_duration:
         remaining = min(interval_duration, cfg.phase2_duration - int(elapsed))
         if remaining <= 0:
@@ -59,20 +60,12 @@ def run_sustained(cfg: TestConfig, ceiling_mbps: int = 5000) -> dict:
             cfg, protocol="tcp", direction="bidir",
             bandwidth_mbps=target_mbps, port=port_tcp, duration=remaining,
         )
-        udp_runner = IperfRunner(
-            cfg, protocol="udp", direction="bidir",
-            bandwidth_mbps=target_mbps, port=port_udp, duration=remaining,
-        )
 
         tcp_runner.run_background()
         register_for_cleanup(tcp_runner)
-        udp_runner.run_background()
-        register_for_cleanup(udp_runner)
 
         tcp_data = tcp_runner.wait(timeout=remaining + 30)
         unregister_for_cleanup(tcp_runner)
-        udp_data = udp_runner.wait(timeout=remaining + 30)
-        unregister_for_cleanup(udp_runner)
 
         # Check for iperf3 crash — retry the interval
         tcp_crashed = tcp_data.get("error") and "timeout" not in str(tcp_data["error"])
@@ -84,24 +77,31 @@ def run_sustained(cfg: TestConfig, ceiling_mbps: int = 5000) -> dict:
             elapsed = time.time() - start_time
             continue
 
-        udp_crashed = udp_data.get("error") and "timeout" not in str(udp_data["error"])
-        if udp_crashed:
-            from setup.remote import start_remote_iperf3
-            start_remote_iperf3(cfg, port_udp)
-            time.sleep(2)
-
         tcp_rows = parse_iperf_tcp_json(tcp_data)
-        udp_rows = parse_iperf_udp_json(udp_data) if not udp_crashed else []
 
         for row in tcp_rows:
             row["phase_elapsed_sec"] = elapsed + row.get("start", 0)
-        for row in udp_rows:
-            row["phase_elapsed_sec"] = elapsed + row.get("start", 0)
 
         write_iperf_csv(tcp_rows, tcp_csv)
-        write_iperf_csv(udp_rows, udp_csv)
 
         elapsed = time.time() - start_time
+
+    # --- Short UDP probe for jitter/loss after TCP sustained test ---
+    udp_probe_duration = 30
+    print(f"  UDP jitter/loss probe ({udp_probe_duration}s)...", flush=True)
+    udp_runner = IperfRunner(
+        cfg, protocol="udp", direction="bidir",
+        bandwidth_mbps=target_mbps, port=port_udp, duration=udp_probe_duration,
+    )
+    udp_runner.run_background()
+    register_for_cleanup(udp_runner)
+    udp_data = udp_runner.wait(timeout=udp_probe_duration + 30)
+    unregister_for_cleanup(udp_runner)
+
+    udp_rows = parse_iperf_udp_json(udp_data)
+    for row in udp_rows:
+        row["phase_elapsed_sec"] = elapsed + row.get("start", 0)
+    write_iperf_csv(udp_rows, udp_csv)
 
     ping_collector.stop()
     unregister_for_cleanup(ping_collector)
