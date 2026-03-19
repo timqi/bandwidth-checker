@@ -1,4 +1,5 @@
 """HTML report generation."""
+import csv
 import os
 from typing import Any, Dict, List, Optional
 
@@ -56,6 +57,62 @@ def _results_table(results: List[Dict]) -> str:
 </table>"""
 
 
+def detect_depletion_from_csv(tcp_csv_path: str) -> Dict:
+    """Analyze Phase 2 TCP throughput data to find depletion point.
+
+    Scans backward from end to find stable region, then finds the transition edge.
+    Returns dict with depletion_time_sec, baseline_mbps, burst_mbps, or empty dict if no data.
+    """
+    if not os.path.exists(tcp_csv_path):
+        return {}
+
+    rows = []
+    with open(tcp_csv_path) as f:
+        for row in csv.DictReader(f):
+            try:
+                rows.append({
+                    "time": float(row.get("phase_elapsed_sec", row.get("start", 0))),
+                    "mbps": float(row["bits_per_second"]) / 1_000_000,
+                })
+            except (ValueError, KeyError):
+                continue
+
+    if len(rows) < 10:
+        return {}
+
+    # Find stable region: last 20% of data
+    tail_start = int(len(rows) * 0.8)
+    tail = rows[tail_start:]
+    baseline_mbps = sum(r["mbps"] for r in tail) / len(tail)
+
+    # Find burst region: first 10% of data
+    head = rows[:max(int(len(rows) * 0.1), 5)]
+    burst_mbps = sum(r["mbps"] for r in head) / len(head)
+
+    # If burst and baseline are similar (within 2x), no depletion occurred
+    if burst_mbps < baseline_mbps * 2:
+        return {
+            "depletion_detected": False,
+            "baseline_mbps": baseline_mbps,
+            "burst_mbps": burst_mbps,
+        }
+
+    # Backward scan: find the last high-throughput row (the transition edge)
+    midpoint = (burst_mbps + baseline_mbps) / 2
+    depletion_time = None
+    for r in reversed(rows):
+        if r["mbps"] >= midpoint:
+            depletion_time = r["time"]
+            break
+
+    return {
+        "depletion_detected": True,
+        "depletion_time_sec": depletion_time,
+        "baseline_mbps": baseline_mbps,
+        "burst_mbps": burst_mbps,
+    }
+
+
 def generate_step_up_report(
     results: List[Dict],
     output_dir: str,
@@ -97,6 +154,7 @@ def generate_final_report(
     throttled_results: Dict,
     output_dir: str,
     chart_paths: Optional[List[str]] = None,
+    tcp_csv_path: Optional[str] = None,
 ) -> str:
     """Generate final comprehensive HTML report."""
     os.makedirs(output_dir, exist_ok=True)
@@ -110,11 +168,23 @@ def generate_final_report(
 
     html += "<h2>Phase 2: Sustained Full-Load</h2>\n"
     html += '<div class="summary">\n'
-    depl_time = sustained_results.get("depletion_time_sec")
-    if depl_time:
-        html += f"<p><strong>Credit depletion detected at:</strong> {depl_time:.0f} seconds</p>\n"
+
+    depletion = {}
+    if tcp_csv_path:
+        depletion = detect_depletion_from_csv(tcp_csv_path)
+
+    if depletion.get("depletion_detected"):
+        depl_time = depletion.get("depletion_time_sec")
+        if depl_time:
+            html += f"<p><strong>Credit depletion detected at:</strong> {depl_time:.0f} seconds</p>\n"
+        html += f"<p><strong>Burst throughput:</strong> {depletion.get('burst_mbps', 0):.0f} Mbps</p>\n"
+        html += f"<p><strong>Baseline throughput:</strong> {depletion.get('baseline_mbps', 0):.0f} Mbps</p>\n"
+    elif depletion:
+        html += "<p>No significant depletion detected — throughput remained stable.</p>\n"
+        html += f"<p><strong>Average throughput:</strong> {depletion.get('baseline_mbps', 0):.0f} Mbps</p>\n"
     else:
-        html += "<p>Credit depletion was not detected during the test window.</p>\n"
+        html += "<p>No Phase 2 data available.</p>\n"
+
     html += f"<p>Total elapsed: {sustained_results.get('total_elapsed_sec', 0):.0f} seconds</p>\n"
     html += "</div>\n"
 
@@ -130,8 +200,10 @@ def generate_final_report(
     html += "<h2>Business Impact Assessment</h2>\n"
     html += '<div class="summary">\n'
     html += "<p><em>Based on test data — review with network and blockchain domain knowledge.</em></p>\n"
-    if depl_time:
-        html += f"<p>Network burst credits last approximately <strong>{depl_time/60:.0f} minutes</strong> under full load.</p>\n"
+    if depletion.get("depletion_detected") and depletion.get("depletion_time_sec"):
+        depl_min = depletion["depletion_time_sec"] / 60
+        html += f"<p>Network burst credits last approximately <strong>{depl_min:.0f} minutes</strong> under full load.</p>\n"
+        html += f"<p>After depletion, bandwidth drops from ~{depletion['burst_mbps']:.0f} Mbps to ~{depletion['baseline_mbps']:.0f} Mbps.</p>\n"
     html += "</div>\n"
 
     if chart_paths:
