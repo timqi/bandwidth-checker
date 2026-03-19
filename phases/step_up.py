@@ -1,9 +1,10 @@
 """Phase 1: Step-up pressure test."""
 import os
 import time
-from typing import Callable, Optional
+from typing import Callable, List, Dict, Any, Optional
 
 from config import TestConfig
+from cleanup import register_for_cleanup, unregister_for_cleanup
 from collectors.iperf import IperfRunner, parse_iperf_tcp_json, parse_iperf_udp_json, write_iperf_csv
 from collectors.latency import LatencyCollector
 from collectors.tcp_stats import TcpStatsCollector
@@ -32,8 +33,10 @@ def run_single_test(
     ss_collector = TcpStatsCollector(cfg.remote_host, ss_path) if protocol == "tcp" else None
 
     ping_collector.start()
+    register_for_cleanup(ping_collector)
     if ss_collector:
         ss_collector.start()
+        register_for_cleanup(ss_collector)
 
     runner = IperfRunner(
         cfg, protocol=protocol, direction=direction,
@@ -43,8 +46,10 @@ def run_single_test(
     iperf_data = runner.run()
 
     ping_collector.stop()
+    unregister_for_cleanup(ping_collector)
     if ss_collector:
         ss_collector.stop()
+        unregister_for_cleanup(ss_collector)
 
     if protocol == "tcp":
         rows = parse_iperf_tcp_json(iperf_data)
@@ -74,14 +79,40 @@ def run_single_test(
     }
 
 
-def run_step_up(cfg: TestConfig, on_progress: Optional[Callable] = None) -> list:
-    """Run Phase 1: step-up pressure test."""
+def _check_limitation(results_at_level: list, target_mbps: int) -> bool:
+    """Check if actual throughput is significantly below target.
+
+    Returns True if limitation detected (actual < 50% of target).
+    Only checks TCP results (TCP is the reliable throughput indicator).
+    """
+    tcp_results = [r for r in results_at_level if r["protocol"] == "tcp"]
+    if not tcp_results:
+        return False
+    total_bps = 0
+    count = 0
+    for r in tcp_results:
+        for row in r.get("iperf_rows", []):
+            total_bps += row.get("bits_per_second", 0)
+            count += 1
+    if count == 0:
+        return False
+    avg_mbps = (total_bps / count) / 1_000_000
+    return avg_mbps < target_mbps * 0.5
+
+
+def run_step_up(
+    cfg: TestConfig,
+    levels: List[Dict[str, Any]],
+    on_progress: Optional[Callable] = None,
+) -> list:
+    """Run Phase 1: step-up pressure test with early stop on limitation."""
     data_dir = cfg.data_dir
     os.makedirs(data_dir, exist_ok=True)
     port = cfg.iperf_base_port
     all_results = []
+    consecutive_limited = 0
 
-    for level in cfg.step_up_levels:
+    for level_idx, level in enumerate(levels):
         bw = level["bandwidth_mbps"]
         print(f"\n=== Level: {bw} Mbps ===", flush=True)
 
@@ -94,13 +125,26 @@ def run_step_up(cfg: TestConfig, on_progress: Optional[Callable] = None) -> list
             for direction in level["udp_directions"]:
                 tests.append(("udp", direction, True))
 
+        level_results = []
         for i, (proto, direction, small_pkt) in enumerate(tests):
             result = run_single_test(cfg, level, proto, direction, port, data_dir, small_pkt)
             all_results.append(result)
+            level_results.append(result)
             if on_progress:
                 on_progress(result)
-            is_last = (level == cfg.step_up_levels[-1] and i == len(tests) - 1)
+            is_last = (level_idx == len(levels) - 1 and i == len(tests) - 1)
             if not is_last:
                 time.sleep(cfg.cooldown)
+
+        # Early stop: check if throughput is significantly limited
+        if _check_limitation(level_results, bw):
+            consecutive_limited += 1
+            print(f"  WARNING: Throughput significantly below target "
+                  f"({consecutive_limited} consecutive limited levels)", flush=True)
+            if consecutive_limited >= 2:
+                print("  STOPPING step-up: bandwidth ceiling reached.", flush=True)
+                break
+        else:
+            consecutive_limited = 0
 
     return all_results
