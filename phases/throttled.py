@@ -4,6 +4,7 @@ import time
 from typing import Optional
 
 from config import TestConfig
+from cleanup import register_for_cleanup, unregister_for_cleanup
 from collectors.iperf import IperfRunner, parse_iperf_tcp_json, parse_iperf_udp_json, write_iperf_csv
 from collectors.latency import LatencyCollector
 from collectors.tcp_stats import TcpStatsCollector
@@ -24,7 +25,9 @@ def run_throttled(cfg: TestConfig) -> dict:
         cfg.remote_host, os.path.join(data_dir, "throttled_ss.csv"),
     )
     ping_collector.start()
+    register_for_cleanup(ping_collector)
     ss_collector.start()
+    register_for_cleanup(ss_collector)
 
     tcp_csv = os.path.join(data_dir, "throttled_iperf_tcp.csv")
     udp_csv = os.path.join(data_dir, "throttled_iperf_udp.csv")
@@ -41,9 +44,13 @@ def run_throttled(cfg: TestConfig) -> dict:
         bandwidth_mbps=5000, port=port + 1, duration=180,
     )
     tcp_runner.run_background()
+    register_for_cleanup(tcp_runner)
     udp_runner.run_background()
+    register_for_cleanup(udp_runner)
     tcp_data = tcp_runner.wait(timeout=210)
+    unregister_for_cleanup(tcp_runner)
     udp_data = udp_runner.wait(timeout=210)
+    unregister_for_cleanup(udp_runner)
 
     tcp_rows = parse_iperf_tcp_json(tcp_data)
     udp_rows = parse_iperf_udp_json(udp_data)
@@ -69,8 +76,14 @@ def run_throttled(cfg: TestConfig) -> dict:
             cfg, protocol="udp", direction="bidir",
             bandwidth_mbps=bw, port=port + 1, duration=30,
         )
-        tcp_d = tcp_r.run()
-        udp_d = udp_r.run()
+        tcp_r.run_background()
+        register_for_cleanup(tcp_r)
+        udp_r.run_background()
+        register_for_cleanup(udp_r)
+        tcp_d = tcp_r.wait(timeout=60)
+        unregister_for_cleanup(tcp_r)
+        udp_d = udp_r.wait(timeout=60)
+        unregister_for_cleanup(udp_r)
 
         tcp_mini = parse_iperf_tcp_json(tcp_d)
         udp_mini = parse_iperf_udp_json(udp_d)
@@ -84,7 +97,9 @@ def run_throttled(cfg: TestConfig) -> dict:
         time.sleep(cfg.cooldown)
 
     ping_collector.stop()
+    unregister_for_cleanup(ping_collector)
     ss_collector.stop()
+    unregister_for_cleanup(ss_collector)
 
     return {
         "steady_tcp_rows": len(tcp_rows),

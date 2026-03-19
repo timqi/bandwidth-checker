@@ -5,6 +5,7 @@ import os
 import signal
 import sys
 import time
+from datetime import datetime
 
 from config import TestConfig
 from cleanup import cleanup_all
@@ -68,12 +69,15 @@ def main():
                         help="Phase 2 duration in seconds (default: 2100 = 35 min)")
     args = parser.parse_args()
 
+    # Auto-timestamp data directory
+    run_dir = os.path.join(args.data_dir, datetime.now().strftime("%Y-%m-%d_%H%M%S"))
+
     cfg = TestConfig(
         remote_host=args.host,
         remote_user=args.user,
         ssh_key=args.key,
         iperf_base_port=args.port,
-        data_dir=args.data_dir,
+        data_dir=run_dir,
     )
     if args.phase2_duration > 0:
         cfg.phase2_duration = args.phase2_duration
